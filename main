@@ -1,0 +1,153 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import autogen
+import openai
+
+# FastAPI app instance
+app = FastAPI()
+
+# Configuration setup
+config_list = [
+    {
+        'api_key': 'your-openai-api-key',
+        'api_type': 'openai',
+        'model': 'gpt-4'
+    }
+]
+
+# Initialize OpenAI client
+openai_client = openai.OpenAI(api_key=config_list[0]['api_key'])
+
+# Define Pydantic model for input validation
+class QueryRequest(BaseModel):
+    query: str
+
+class ConversationThread:
+    def __init__(self, config_list):
+        self.config_list = config_list
+        self.openai_client = openai_client
+        self.conversation_history = []
+
+    def classify_query(self, query):
+        """
+        Use OpenAI to classify the medical query type.
+        """
+        # Include the last 3 messages for context
+        context = "\n".join(self.conversation_history[-3:] + [query])
+        
+        try:
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """
+                        You are a medical query classifier. 
+                        Classify the query into one of these categories:
+                        1. DIAGNOSIS_QUERY: Questions about symptoms, medical conditions, or possible diagnoses.
+                        2. TREATMENT_QUERY: Inquiries about medications, therapies, or home remedies.
+                        3. FOLLOW_UP_QUERY: Continuations of previous conversations or further clarifications.
+
+                        Only return: DIAGNOSIS_QUERY, TREATMENT_QUERY, or FOLLOW_UP_QUERY.
+                        """
+                    },
+                    {
+                        "role": "user",
+                        "content": context
+                    }
+                ],
+                max_tokens=10
+            )
+            classification = response.choices[0].message.content.strip()
+            print(f"🔍 Query Classification: {classification}")
+            return classification
+        
+        except Exception as e:
+            print(f"❌ Classification Error: {e}")
+            return None
+
+    def add_to_history(self, message, role='user'):
+        """
+        Add message to conversation history, maintaining a sliding window.
+        """
+        self.conversation_history.append(message)
+        if len(self.conversation_history) > 10:
+            self.conversation_history = self.conversation_history[-10:]
+
+# Initialize agents
+diagnosis_agent = autogen.AssistantAgent(
+    name="diagnosis_agent",
+    llm_config={"config_list": config_list},
+    system_message="""
+    You are a medical diagnosis expert, providing insights on 
+    symptoms, conditions, and possible health concerns.
+    """
+)
+
+treatment_agent = autogen.AssistantAgent(
+    name="treatment_agent",
+    llm_config={"config_list": config_list},
+    system_message="""
+    You are a medical treatment advisor, offering guidance on 
+    medications, therapies, and remedies for various health issues.
+    """
+)
+
+# User Proxy Agent to mediate interactions
+user_proxy = autogen.UserProxyAgent(
+    name="user_proxy",
+    human_input_mode="NEVER",
+    max_consecutive_auto_reply=1,
+    is_termination_msg=lambda x: x.get("content", "").find("TERMINATE") >= 0,
+    code_execution_config=False,
+)
+
+# Conversation thread manager
+conversation_thread = ConversationThread(config_list)
+
+def route_query(query):
+    """
+    Classify and route the query to the appropriate medical agent.
+    """
+    classification = conversation_thread.classify_query(query)
+    if classification in ["DIAGNOSIS_QUERY", "FOLLOW_UP_QUERY"]:
+        return diagnosis_agent
+    elif classification == "TREATMENT_QUERY":
+        return treatment_agent
+    return None
+
+def handle_query(query):
+    """
+    Process and respond to a user query.
+    """
+    conversation_thread.add_to_history(query)
+
+    agent = route_query(query)
+    if not agent:
+        return "⚠️ Unable to classify or route the query."
+
+    # Use the proxy agent to manage the conversation
+    user_proxy.initiate_chat(agent, message=query, max_turns=1)
+
+    # Get and return the response
+    response = user_proxy.last_message["content"]
+    conversation_thread.add_to_history(response, role='assistant')
+    return response
+
+@app.post("/query")
+async def process_query(request: QueryRequest):
+    """
+    API endpoint to handle user queries and return agent responses.
+    """
+    try:
+        response = handle_query(request.query)
+        return {"response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/")
+async def root():
+    """
+    Health check endpoint.
+    """
+    return {"message": "Doctor Intelligence API is running!"}
