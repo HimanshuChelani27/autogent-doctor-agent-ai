@@ -25,7 +25,7 @@ An intelligent FastAPI-based medical query classifier and responder using OpenAI
 1. **Clone the repository:**
 
     ```bash
-    git clone https://github.com/HimanshuChelani27/autogen-doctor-ai.git
+    git clone https://github.com/HimanshuChelani27/autogent-doctor-agent-ai.git
     cd doctor-intelligence-api
     ```
 
